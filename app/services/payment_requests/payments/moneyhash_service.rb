@@ -108,7 +108,7 @@ module PaymentRequests
             phone_number: customer.phone,
             email: customer.email,
             city: customer.city,
-            country: payable.country.upcase,
+            country: customer.country.upcase,
             state: customer.state
           },
           customer: customer.external_id,
