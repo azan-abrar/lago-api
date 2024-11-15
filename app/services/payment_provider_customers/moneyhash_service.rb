@@ -19,6 +19,7 @@ module PaymentProviderCustomers
         provider_customer_id: moneyhash_result["data"]["id"]
       )
       deliver_success_webhook
+      PaymentProviderCustomers::MoneyhashCheckoutUrlJob.perform_later(moneyhash_customer)
       result.moneyhash_customer = moneyhash_customer
       result
     end

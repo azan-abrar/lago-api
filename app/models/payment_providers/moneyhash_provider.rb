@@ -6,8 +6,12 @@ module PaymentProviders
 
     validates :api_key, presence: true
     validates :success_redirect_url, url: true, allow_nil: true, length: {maximum: 1024}
+    validates :failed_redirect_url, url: true, allow_nil: true
+    validates :pending_external_action_redirect_url, url: true, allow_nil: true
+    validates :webhook_url, url: true, allow_nil: true
 
     secrets_accessors :api_key
+    settings_accessors :failed_redirect_url, :pending_external_action_redirect_url, :webhook_url
 
     def self.api_base_url
       if Rails.env.production?
