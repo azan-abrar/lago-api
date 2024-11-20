@@ -28,6 +28,19 @@ module PaymentProviderCustomers
       result
     end
 
+    def update_payment_method(organization_id:, customer_id:, payment_method_id:, metadata: {})
+      customer = PaymentProviderCustomers::MoneyhashCustomer.find_by(customer_id: customer_id)
+      return handle_missing_customer(organization_id, metadata) unless customer
+
+      customer.payment_method_id = payment_method_id
+      customer.save!
+
+      result.moneyhash_customer = customer
+      result
+    rescue ActiveRecord::RecordInvalid => e
+      result.record_validation_failure!(record: e.record)
+    end
+
     private
 
     attr_accessor :moneyhash_customer
@@ -87,6 +100,13 @@ module PaymentProviderCustomers
         'Content-Type' => 'application/json',
         'x-Api-Key' => moneyhash_payment_provider.api_key
       }
+    end
+
+    def handle_missing_customer(organization_id, metadata)
+      return result unless metadata&.key?("lago_customer_id")
+      return result if Customer.find_by(id: metadata["lago_customer_id"], organization_id:).nil?
+
+      result.not_found_failure!(resource: 'moneyhash_customer')
     end
   end
 end
