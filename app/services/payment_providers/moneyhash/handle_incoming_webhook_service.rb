@@ -22,7 +22,7 @@ module PaymentProviders
 
         return handle_payment_provider_failure(payment_provider_result) unless payment_provider_result.success?
 
-        PaymentProviders::Moneyhash::HandleEventJob.perform_now(organization:, event_json: body)
+        PaymentProviders::Moneyhash::HandleEventJob.perform_later(organization:, event_json: body)
         result.event = body
         result
       end

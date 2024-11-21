@@ -5,7 +5,7 @@ module PaymentRequests
     class MoneyhashService < BaseService
       include Customers::PaymentProviderFinder
 
-      PENDING_STATUSES = %w[UNPROCESSED]
+      PENDING_STATUSES = %w[PENDING]
         .freeze
       SUCCESS_STATUSES = %w[PROCESSED].freeze
       FAILED_STATUSES = %w[FAILED].freeze
@@ -18,6 +18,7 @@ module PaymentRequests
 
       def create
         result.payable = payable
+        result.single_validation_failure!(error_code: "payment_method_error") if moneyhash_payment_method.nil?
         return result unless should_process_payment?
 
         unless payable.total_amount_cents.positive?
@@ -27,9 +28,7 @@ module PaymentRequests
 
         payable.increment_payment_attempts!
 
-        moneyhash_result = create_moneyhash_payment_url
-        moneyhash_result_data = moneyhash_result["data"]
-
+        moneyhash_result = create_moneyhash_payment
         return result unless moneyhash_result
 
         payment = Payment.new(
@@ -38,30 +37,50 @@ module PaymentRequests
           payment_provider_customer_id: customer.moneyhash_customer.id,
           amount_cents: payable.amount_cents,
           amount_currency: payable.currency&.upcase,
-          provider_payment_id: moneyhash_result_data["id"],
-          status: moneyhash_result_data["status"]
+          provider_payment_id: moneyhash_result.dig("data", "id"),
+          status: moneyhash_result.dig("data", "status")
         )
 
         payment.save!
 
         payable_payment_status = payable_payment_status(payment.status)
-        payment_url_exist = moneyhash_result_data["embed_url"]
 
-        update_payable_payment_status(payment_status: payable_payment_status)
-        update_invoices_payment_status(payment_status: payable_payment_status)
-
-        Integrations::Aggregator::Payments::CreateJob.perform_later(payment:) if payment.should_sync_payment?
-
-        if payment_url_exist
-          SendWebhookJob.perform_later(
-            'customer.checkout_url_generated',
-            customer,
-            checkout_url: result.checkout_url
-          )
-        end
-
+        update_payable_payment_status(
+          payment_status: payable_payment_status,
+          processing: payment.status == "processing"
+        )
+        update_invoices_payment_status(
+          payment_status: payable_payment_status,
+          processing: payment.status == "processing"
+        )
         result.payment = payment
         result
+      end
+
+      def update_payment_status(organization_id:, provider_payment_id:, status:, metadata: {})
+        payment_obj = Payment.find_or_initialize_by(provider_payment_id: provider_payment_id)
+        payment = if payment_obj.persisted?
+          payment_obj
+        else
+          create_payment(provider_payment_id:, metadata:)
+        end
+
+        return handle_missing_payment(organization_id, metadata) unless payment
+
+        result.payment = payment
+        result.payable = payment.payable
+        return result if payment.payable.payment_succeeded?
+        payment.update!(status:)
+
+        processing = status == "processing"
+        payment_status = payable_payment_status(status)
+        update_payable_payment_status(payment_status:, processing:)
+        update_invoices_payment_status(payment_status:, processing:)
+
+        PaymentRequestMailer.with(payment_request: payment.payable).requested.deliver_later if result.payable.payment_failed?
+        result
+      rescue BaseService::FailedResult => e
+        result.fail_with_error!(e)
       end
 
       private
@@ -69,6 +88,35 @@ module PaymentRequests
       attr_accessor :payable
 
       delegate :organization, :customer, to: :payable
+
+      def handle_missing_payment(organization_id, metadata)
+        return result unless metadata&.key?("lago_payable_id")
+        payment_request = PaymentRequest.find_by(id: metadata["lago_payable_id"], organization_id:)
+        return result unless payment_request
+        return result if payment_request.payment_failed?
+
+        result.not_found_failure!(resource: "moneyhash_payment")
+      end
+
+      def create_payment(provider_payment_id:, metadata:)
+        @payable = PaymentRequest.find_by(id: metadata["lago_payable_id"])
+
+        unless payable
+          result.not_found_failure!(resource: "payment_request")
+          return
+        end
+
+        payable.increment_payment_attempts!
+
+        Payment.new(
+          payable:,
+          payment_provider_id: moneyhash_payment_provider.id,
+          payment_provider_customer_id: customer.moneyhash_customer.id,
+          amount_cents: payable.total_amount_cents,
+          amount_currency: payable.currency&.upcase,
+          provider_payment_id:
+        )
+      end
 
       def moneyhash_payment_method
         customer.moneyhash_customer.payment_method_id
@@ -96,34 +144,25 @@ module PaymentRequests
         @moneyhash_payment_provider ||= payment_provider(customer)
       end
 
-      def create_moneyhash_payment_url
+      def create_moneyhash_payment
         payment_params = {
           amount: payable.total_amount_cents,
           amount_currency: payable.currency.upcase,
-          expires_after_seconds: 600,
           operation: "purchase",
-          billing_data: {
-            first_name: customer.firstname,
-            last_name: customer.lastname,
-            phone_number: customer.phone,
-            email: customer.email,
-            city: customer.city,
-            country: customer.country.upcase,
-            state: customer.state
-          },
-          customer: customer.external_id,
-          successful_redirect_url: moneyhash_payment_provider.success_redirect_url,
-          failed_redirect_url: moneyhash_payment_provider.failed_redirect_url,
-          pending_external_action_redirect_url: moneyhash_payment_provider.pending_external_action_redirect_url,
+          customer: customer.moneyhash_customer.provider_customer_id,
           webhook_url: moneyhash_payment_provider.webhook_url,
-          merchant_initiated: false,
-          tokenize_card: true,
+          merchant_initiated: true,
           payment_type: "UNSCHEDULED",
+          card_token: moneyhash_payment_method,
           recurring_data: {
-            agreement_id: payable.id
+            agreement_id: payable&.invoices&.first&.id
+          },
+          custom_fields: {
+            lago_customer_id: customer&.id,
+            lago_payable_id: payable.id,
+            lago_payable_type: payable.class.name
           }
         }
-
         response = client.post_with_response(payment_params, headers)
         JSON.parse(response.body)
       rescue LagoHttpClient::HttpError => e
@@ -140,24 +179,24 @@ module PaymentRequests
         payment_status
       end
 
-      def update_payable_payment_status(payment_status:, deliver_webhook: true)
+      def update_payable_payment_status(payment_status:, deliver_webhook: true, processing: false)
         UpdateService.call(
           payable: result.payable,
           params: {
             payment_status:,
-            ready_for_payment_processing: payment_status.to_sym != :succeeded
+            ready_for_payment_processing: !processing && payment_status.to_sym != :succeeded
           },
           webhook_notification: deliver_webhook
         ).raise_if_error!
       end
 
-      def update_invoices_payment_status(payment_status:, deliver_webhook: true)
+      def update_invoices_payment_status(payment_status:, deliver_webhook: true, processing: false)
         result.payable.invoices.each do |invoice|
           Invoices::UpdateService.call(
-            invoice:,
+            invoice: invoice,
             params: {
               payment_status:,
-              ready_for_payment_processing: payment_status.to_sym != :succeeded
+              ready_for_payment_processing: !processing && payment_status.to_sym != :succeeded
             },
             webhook_notification: deliver_webhook
           ).raise_if_error!
