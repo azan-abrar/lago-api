@@ -14,6 +14,45 @@ module PaymentProviders
       "PaymentRequest" => PaymentRequests::Payments::MoneyhashService
     }.freeze
 
+    def create_or_update(**args)
+      payment_provider_result = PaymentProviders::FindService.call(
+        organization_id: args[:organization].id,
+        code: args[:code],
+        id: args[:id],
+        payment_provider_type: 'moneyhash'
+      )
+
+      moneyhash_provider = if payment_provider_result.success?
+        payment_provider_result.payment_provider
+      else
+        PaymentProviders::MoneyhashProvider.new(
+          organization_id: args[:organization].id,
+          code: args[:code]
+        )
+      end
+
+      api_key = adyen_provider.api_key
+      old_code = moneyhash_provider.code
+      moneyhash_provider.api_key = args[:api_key] if args.key?(:api_key)
+      moneyhash_provider.code = args[:code] if args.key?(:code)
+      moneyhash_provider.name = args[:name] if args.key?(:name)
+      moneyhash_provider.webhook_redirect_url = args[:webhook_redirect_url] if args.key?(:webhook_redirect_url)
+      moneyhash_provider.failed_redirect_url = args[:failed_redirect_url] if args.key?(:failed_redirect_url)
+      moneyhash_provider.pending_redirect_url = args[:pending_redirect_url] if args.key?(:pending_redirect_url)
+      moneyhash_provider.success_redirect_url = args[:success_redirect_url] if args.key?(:success_redirect_url)
+
+      moneyhash_provider.save(validate: false)
+
+      if payment_provider_code_changed?(moneyhash_provider, old_code, args)
+        moneyhash_provider.customers.update_all(payment_provider_code: args[:code]) # rubocop:disable Rails/SkipsModelValidations
+      end
+
+      result.moneyhash_provider = moneyhash_provider
+      result
+    rescue ActiveRecord::RecordInvalid => e
+      result.record_validation_failure!(record: e.record)
+    end
+
     def handle_event(organization:, event_json:)
       @event_json = event_json
       @event_code = event_json['type']
