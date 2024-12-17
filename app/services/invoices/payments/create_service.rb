@@ -17,6 +17,8 @@ module Invoices
           Invoices::Payments::GocardlessCreateJob.perform_later(invoice)
         when :adyen
           Invoices::Payments::AdyenCreateJob.perform_later(invoice)
+        when :moneyhash
+          Invoices::Payments::MoneyhashCreateJob.perform_now(invoice)
         end
       rescue ActiveJob::Uniqueness::JobNotUnique => e
         Sentry.capture_exception(e)

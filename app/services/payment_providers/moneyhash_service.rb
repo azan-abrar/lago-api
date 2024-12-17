@@ -2,7 +2,6 @@
 
 module PaymentProviders
   class MoneyhashService < BaseService
-
     INTENT_WEBHOOKS_EVENTS = %w[intent.processed intent.time_expired].freeze
     TRANSACTION_WEBHOOKS_EVENTS = %w[transaction.purchase.failed transaction.purchase.pending transaction.purchase.successful].freeze
     CARD_WEBHOOKS_EVENTS = %w[card_token.created card_token.updated card_token.deleted].freeze
@@ -31,7 +30,7 @@ module PaymentProviders
         )
       end
 
-      api_key = adyen_provider.api_key
+      moneyhash_provider.api_key
       old_code = moneyhash_provider.code
       moneyhash_provider.api_key = args[:api_key] if args.key?(:api_key)
       moneyhash_provider.code = args[:code] if args.key?(:code)
@@ -90,7 +89,7 @@ module PaymentProviders
         payment_service_klass(@event_json)
           .new.update_payment_status(
             organization_id: @organization.id,
-            provider_payment_id: @event_json.dig('data','intent_id'),
+            provider_payment_id: @event_json.dig('data', 'intent_id'),
             status: payment_statuses[@event_code.to_sym],
             metadata: @event_json.dig('data', 'intent', 'custom_fields')
           ).raise_if_error!
@@ -110,7 +109,7 @@ module PaymentProviders
             organization_id: @organization.id,
             provider_payment_id: @event_json.dig('intent', 'id'),
             status: payment_statuses[@event_code.to_sym],
-            metadata: @event_json.dig('intent','custom_fields')
+            metadata: @event_json.dig('intent', 'custom_fields')
           ).raise_if_error!
       end
     end
@@ -120,8 +119,8 @@ module PaymentProviders
 
       case @event_code
       when 'card_token.deleted'
-        payment_method_id = @event_json.dig('data','card_token', 'id')
-        customer_id = @event_json.dig('data','card_token', 'custom_fields', 'lago_customer_id')
+        payment_method_id = @event_json.dig('data', 'card_token', 'id')
+        customer_id = @event_json.dig('data', 'card_token', 'custom_fields', 'lago_customer_id')
         customer = PaymentProviderCustomers::MoneyhashCustomer.find_by(customer_id: customer_id)
 
         selected_payment_method_id = (customer&.payment_method_id == payment_method_id) ? nil : payment_method_id
@@ -130,16 +129,16 @@ module PaymentProviders
             organization_id: @organization.id,
             customer_id: customer_id,
             payment_method_id: selected_payment_method_id,
-            metadata: @event_json.dig('data','card_token', 'custom_fields')
+            metadata: @event_json.dig('data', 'card_token', 'custom_fields')
           ).raise_if_error!
 
-      when 'card_token.created','card_token.updated'
+      when 'card_token.created', 'card_token.updated'
         service
           .update_payment_method(
             organization_id: @organization.id,
-            customer_id: @event_json.dig('data','card_token', 'custom_fields', 'lago_customer_id'),
-            payment_method_id: @event_json.dig('data','card_token', 'id'),
-            metadata: @event_json.dig('data','card_token', 'custom_fields')
+            customer_id: @event_json.dig('data', 'card_token', 'custom_fields', 'lago_customer_id'),
+            payment_method_id: @event_json.dig('data', 'card_token', 'id'),
+            metadata: @event_json.dig('data', 'card_token', 'custom_fields')
           ).raise_if_error!
       end
     end

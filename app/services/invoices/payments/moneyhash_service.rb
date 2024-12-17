@@ -16,6 +16,37 @@ module Invoices
         super(nil)
       end
 
+      def create
+        result.invoice = invoice
+        return result unless should_process_payment?
+
+        unless invoice.total_amount_cents.positive?
+          update_invoice_payment_status(payment_status: :succeeded)
+          return result
+        end
+
+        increment_payment_attempts
+
+        payment = Payment.new(
+          payable: invoice,
+          payment_provider_id: moneyhash_payment_provider.id,
+          payment_provider_customer_id: customer.moneyhash_customer.id,
+          amount_cents: invoice.total_amount_cents,
+          amount_currency: invoice.currency.upcase,
+          provider_payment_id: provider_payment_id,
+          status: status
+        )
+        payment.save!
+
+        invoice_payment_status = invoice_payment_status(payment.status)
+        update_invoice_payment_status(payment_status: invoice_payment_status)
+
+        Integrations::Aggregator::Payments::CreateJob.perform_later(payment:) if payment.should_sync_payment?
+
+        result.payment = payment
+        result
+      end
+
       def update_payment_status(organization_id:, provider_payment_id:, status:, metadata: {})
         payment_obj = Payment.find_or_initialize_by(provider_payment_id: provider_payment_id)
         payment = if payment_obj.persisted?
@@ -144,8 +175,8 @@ module Invoices
           customer: invoice.customer.moneyhash_customer.provider_customer_id,
           successful_redirect_url: moneyhash_payment_provider.success_redirect_url,
           failed_redirect_url: moneyhash_payment_provider.failed_redirect_url,
-          pending_external_action_redirect_url: moneyhash_payment_provider.pending_external_action_redirect_url,
-          webhook_url: moneyhash_payment_provider.webhook_url,
+          pending_external_action_redirect_url: moneyhash_payment_provider.pending_redirect_url,
+          webhook_url: moneyhash_payment_provider.webhook_redirect_url,
           merchant_initiated: false,
           tokenize_card: true,
           payment_type: "UNSCHEDULED",
